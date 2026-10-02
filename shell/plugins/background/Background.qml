@@ -6,11 +6,13 @@ import QtQuick.Effects
 import QtQuick.Shapes
 import qs.Commons
 import qs.Ui
+import "MonitorBackgrounds.js" as MonitorBackgrounds
 
 Item {
   id: root
 
   property var shell: null
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string home: Quickshell.env("HOME")
   readonly property string stateHome: home + "/.local/state"
   readonly property string currentBackgroundLink: stateHome + "/omarchy/current/background"
@@ -42,6 +44,15 @@ Item {
   property string pendingColorsRaw: ""
   property string pendingShellRaw: ""
   property real revealProgress: 1
+  // Monitors that show their own background, by output name (see
+  // MonitorBackgrounds.js). The base and outgoing frames follow the map that is
+  // on screen, the incoming frame the newest one, so a change reveals like any
+  // other background change.
+  property var monitorBackgrounds: ({})
+  property var displayedMonitorBackgrounds: ({})
+  property bool monitorBackgroundsLoaded: false
+  property bool monitorBackgroundsQueued: false
+  property string oldDurableBackground: ""
 
   function isVideo(path) {
     return Util.isVideoPath(path)
@@ -55,6 +66,40 @@ Item {
     if (!readlinkProc.running) readlinkProc.running = true
   }
 
+  function refreshMonitorBackgrounds() {
+    if (monitorBackgroundsProc.running) monitorBackgroundsQueued = true
+    else monitorBackgroundsProc.running = true
+  }
+
+  function monitorPath(output, path, durable, backgrounds) {
+    return MonitorBackgrounds.resolve(backgrounds, output, path, durable)
+  }
+
+  // Whether any connected monitor would show something else after the change.
+  function monitorsChange(fromPath, fromDurable, path, durable) {
+    var screens = Quickshell.screens
+    for (var i = 0; i < screens.length; i++) {
+      var output = screens[i].name
+      if (monitorPath(output, fromPath, fromDurable, displayedMonitorBackgrounds) !== monitorPath(output, path, durable, monitorBackgrounds)) return true
+    }
+    return false
+  }
+
+  function applyMonitorBackgrounds(backgrounds) {
+    var first = !monitorBackgroundsLoaded
+    monitorBackgroundsLoaded = true
+    if (MonitorBackgrounds.same(backgrounds, monitorBackgrounds)) return
+    monitorBackgrounds = backgrounds
+
+    // Mid-reveal, the incoming frame already follows the new map.
+    if (incomingBackground && revealProgress < 1) return
+    if (first || !displayedBackground || !monitorsChange(displayedBackground, displayedBackground, displayedBackground, displayedBackground)) {
+      displayedMonitorBackgrounds = backgrounds
+      return
+    }
+    transitionBackground(displayedBackground, displayedBackground, displayedBackground, false, true)
+  }
+
   function setBackground(path, instant) {
     transitionBackground("", path, path, instant, false)
   }
@@ -64,6 +109,7 @@ Item {
     finalPath = String(finalPath || path).trim()
     fromPath = String(fromPath || "").trim()
     if (!path || (!force && finalPath === currentBackground)) return
+    var fromDurable = displayedBackground
     if (path !== preparedBackground) preparedBackground = ""
     preparedBackgroundTimer.stop()
     lastTransitionPath = path
@@ -79,16 +125,21 @@ Item {
     finishingTransition = false
 
     // Video frames are not fed through the image-only reveal stack. Switching
-    // instantly also avoids decoding two full videos during a transition.
-    if (instant || !displayedBackground || isVideo(path) || isVideo(displayedBackground)) {
+    // instantly also avoids decoding two full videos during a transition. A
+    // change no monitor would show, as when every monitor keeps its own
+    // background, has nothing to reveal either.
+    if (instant || !displayedBackground || isVideo(path) || isVideo(displayedBackground) ||
+        !monitorsChange(fromPath || displayedBackground, fromDurable, path, finalPath)) {
       oldBackground = ""
       incomingBackground = ""
       preparedBackground = ""
       displayedBackground = finalPath
+      displayedMonitorBackgrounds = monitorBackgrounds
       revealProgress = 1
       return
     }
 
+    oldDurableBackground = fromDurable
     oldBackground = fromPath || displayedBackground
     incomingBackground = path
     revealProgress = 0
@@ -153,11 +204,27 @@ Item {
     sizeProbe.running = true
   }
 
+  // Monitors can end a reveal on different files, so the transition frames
+  // stay up until every monitor's base frame is ready.
+  function finishTransitionIfSettled() {
+    if (!finishingTransition) return
+    var panels = backgroundPanels.instances
+    for (var i = 0; i < panels.length; i++) {
+      if (!panels[i].baseSettled) return
+    }
+    incomingBackground = ""
+    oldBackground = ""
+    preparedBackground = ""
+    finishingTransition = false
+    pruneNativeSizes()
+  }
+
   // Each theme switch names fresh snapshot paths, so keep only the sizes of
   // the wallpapers still in play.
   function pruneNativeSizes() {
     var kept = {}
     var paths = [displayedBackground, incomingBackground, oldBackground, preparedBackground]
+      .concat(MonitorBackgrounds.paths(monitorBackgrounds, [displayedBackground]))
     for (var i = 0; i < paths.length; i++) {
       if (paths[i] && nativeSizes[paths[i]] !== undefined) kept[paths[i]] = nativeSizes[paths[i]]
     }
@@ -201,6 +268,19 @@ Item {
   }
 
   Process {
+    id: monitorBackgroundsProc
+    command: [root.omarchyPath + "/shell/plugins/background/monitor-backgrounds.sh"]
+    stdout: StdioCollector {
+      onStreamFinished: root.applyMonitorBackgrounds(MonitorBackgrounds.parse(text))
+    }
+    onExited: {
+      if (!root.monitorBackgroundsQueued) return
+      root.monitorBackgroundsQueued = false
+      root.refreshMonitorBackgrounds()
+    }
+  }
+
+  Process {
     id: readlinkProc
     command: ["readlink", "-f", root.currentBackgroundLink]
     stdout: StdioCollector {
@@ -213,6 +293,11 @@ Item {
 
     function refresh(): void {
       root.refreshBackground()
+      root.refreshMonitorBackgrounds()
+    }
+
+    function refreshMonitors(): void {
+      root.refreshMonitorBackgrounds()
     }
 
     function set(path: string): void {
@@ -229,6 +314,8 @@ Item {
 
     function themeTransition(fromPath: string, path: string, finalPath: string, colorsB64: string, shellB64: string): void {
       root.transitionBackgroundWithTheme(fromPath, path, finalPath, colorsB64, shellB64)
+      // A monitor's folder may sit inside the theme that just changed.
+      root.refreshMonitorBackgrounds()
     }
 
     function prepare(path: string): void {
@@ -262,16 +349,33 @@ Item {
     easing.type: Easing.InOutCubic
     onFinished: {
       if (root.incomingBackground) {
+        var panels = backgroundPanels.instances
+        var before = []
+        for (var i = 0; i < panels.length; i++) before.push(panels[i].basePath)
         root.displayedBackground = root.currentBackground || root.incomingBackground
+        root.displayedMonitorBackgrounds = root.monitorBackgrounds
         root.finishingTransition = true
+        // A base frame that moves to a file already decoded is ready at once
+        // and reports no change. One that keeps its path keeps the incoming
+        // frame up, as it always has, since that frame may hold newer pixels.
+        for (i = 0; i < panels.length; i++) {
+          if (panels[i].basePath !== before[i]) {
+            Qt.callLater(root.finishTransitionIfSettled)
+            break
+          }
+        }
       }
       root.revealProgress = 1
     }
   }
 
-  Component.onCompleted: refreshBackground()
+  Component.onCompleted: {
+    refreshMonitorBackgrounds()
+    refreshBackground()
+  }
 
   Variants {
+    id: backgroundPanels
     model: Quickshell.screens
 
     PanelWindow {
@@ -294,6 +398,25 @@ Item {
       updatesEnabled: true
 
       property bool maskReady: false
+
+      // What this monitor shows in each frame: the shared background, or its own.
+      readonly property string outputName: modelData.name
+      readonly property string basePath: root.monitorPath(outputName, root.displayedBackground, root.displayedBackground, root.displayedMonitorBackgrounds)
+      readonly property string oldPath: root.monitorPath(outputName, root.oldBackground, root.oldDurableBackground, root.displayedMonitorBackgrounds)
+      // A prepared frame is a snapshot that a folder cannot match by name, so a
+      // monitor with its own background leaves it undecoded.
+      readonly property string incomingPath: root.incomingBackground
+        ? root.monitorPath(outputName, root.incomingBackground, root.currentBackground, root.monitorBackgrounds)
+        : (root.monitorBackgrounds[outputName] ? "" : root.preparedBackground)
+      // A monitor that keeps its own background through a change has nothing
+      // to reveal, and decodes no transition frames.
+      readonly property bool revealing: incomingPath !== oldPath
+      readonly property bool baseSettled: base.ready || !basePath || root.isVideo(basePath)
+
+      onBasePathChanged: root.requestNativeSize(basePath)
+      onOldPathChanged: root.requestNativeSize(oldPath)
+      onIncomingPathChanged: root.requestNativeSize(incomingPath)
+      Component.onCompleted: root.requestNativeSize(basePath)
 
       // Decode the wallpaper at the size this screen can show, not the size
       // it was shipped at. With PreserveAspectCrop Qt takes sourceSize as the
@@ -336,25 +459,20 @@ Item {
       BackgroundMedia {
         id: base
         anchors.fill: parent
-        path: root.displayedBackground
+        path: panel.basePath
         constrainDecode: true
-        decodeSize: panel.decodeSize(root.displayedBackground)
+        decodeSize: panel.decodeSize(panel.basePath)
+        // Later, so every panel's baseSettled has caught up with this change.
         onReadyChanged: {
-          if (ready && root.finishingTransition) {
-            root.incomingBackground = ""
-            root.oldBackground = ""
-            root.preparedBackground = ""
-            root.finishingTransition = false
-            root.pruneNativeSizes()
-          }
+          if (ready) Qt.callLater(root.finishTransitionIfSettled)
         }
       }
 
       Image {
         id: oldFrame
         anchors.fill: parent
-        readonly property size decode: panel.decodeSize(root.oldBackground)
-        source: decode.width > 0 ? root.imageUrl(root.oldBackground) : ""
+        readonly property size decode: panel.decodeSize(panel.oldPath)
+        source: decode.width > 0 && panel.revealing ? root.imageUrl(panel.oldPath) : ""
         sourceSize.width: decode.width
         sourceSize.height: decode.height
         fillMode: Image.PreserveAspectCrop
@@ -384,9 +502,9 @@ Item {
           anchors.fill: parent
           // The same URL and size as a prepared frame keeps its decoded
           // image, so a transition to it can reveal at once.
-          readonly property string framePath: root.incomingBackground || root.preparedBackground
+          readonly property string framePath: panel.incomingPath
           readonly property size decode: panel.decodeSize(framePath)
-          source: decode.width > 0 ? root.imageUrl(framePath) : ""
+          source: decode.width > 0 && panel.revealing ? root.imageUrl(framePath) : ""
           sourceSize.width: decode.width
           sourceSize.height: decode.height
           fillMode: Image.PreserveAspectCrop

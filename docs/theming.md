@@ -9,7 +9,9 @@ Omarchy themes live under `themes/<name>/` in the source tree (installed at
 Beyond `colors.toml` and hand-written config overrides, a first-party theme can
 ship `backgrounds/` (users overlay their own via
 `~/.config/omarchy/backgrounds/<name>/`; the active image is the
-`~/.local/state/omarchy/current/background` symlink), `preview.png` and
+`~/.local/state/omarchy/current/background` symlink, and a monitor with its own
+background has a link to an image or folder at
+`~/.local/state/omarchy/current/monitor-backgrounds/<output>`), `preview.png` and
 `preview-unlock.png` for the theme switcher, `icons.theme`, `keyboard.rgb`,
 `unlock.png`, and a `light.mode` marker file.
 

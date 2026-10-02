@@ -26,7 +26,8 @@ const themeSet = fs.readFileSync(path.join(root, 'bin/omarchy-theme-set'), 'utf8
 // transition arrives: WebP decodes take as long at screen size as at native.
 assert(
   /function prepare\(path: string\): void \{\s*root\.prepareBackground\(path\)/.test(backgroundQml) &&
-    backgroundQml.includes('readonly property string framePath: root.incomingBackground || root.preparedBackground'),
+    backgroundQml.includes('readonly property string framePath: panel.incomingPath') &&
+    backgroundQml.includes(': (root.monitorBackgrounds[outputName] ? "" : root.preparedBackground)'),
   'background decodes a prepared theme background in the hidden incoming frame'
 )
 assert(
@@ -62,9 +63,9 @@ assert(
 const count = (needle) => backgroundQml.split(needle).length - 1
 assertEqual(count('sourceSize.width: decode.width'), 2, 'both transition frames bind their decode width')
 assertEqual(count('sourceSize.height: decode.height'), 2, 'both transition frames bind their decode height')
-assertEqual(count('source: decode.width > 0 ? root.imageUrl('), 2, 'both transition frames wait for the screen and native sizes before loading')
+assertEqual(count('source: decode.width > 0 && panel.revealing ? root.imageUrl('), 2, 'both transition frames wait for the screen and native sizes before loading')
 assert(
-  /constrainDecode: true\s*decodeSize: panel\.decodeSize\(root\.displayedBackground\)/.test(backgroundQml) &&
+  /path: panel\.basePath\s*constrainDecode: true\s*decodeSize: panel\.decodeSize\(panel\.basePath\)/.test(backgroundQml) &&
     mediaQml.includes('source: !root.constrainDecode || root.decodeSize.width > 0 ? root.imageUrl : ""') &&
     mediaQml.includes('sourceSize.width: root.constrainDecode ? root.decodeSize.width : (root.version > 0 ? width : 0)'),
   'the displayed wallpaper waits for and decodes at the same size'
